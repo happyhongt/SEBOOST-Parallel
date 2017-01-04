@@ -82,10 +82,14 @@ function optim.seboost_tao(opfunc, x, config, state)
   local sesopData = config.sesopData
   local sesopLabels = config.sesopLabels
   local sesopBatchSize = config.sesopBatchSize or 100
+  local isNormalize = config.isNormalize or false
+  local isAverage_Ini = config.isAverage_Ini or false
+  local eps = 1e-5
+
   -- Tao codes
-  local state.histSize = state.histSize or 0
+  state.histSize = state.histSize or 0
   if state.histSize ~=0 then
-     local state.histspace = state.histspace or torch.zeros(x:size(1),state.histSize)
+     state.histspace = state.histspace or torch.zeros(x:size(1),state.histSize)
   end
 
   state.itr = state.itr or 0
@@ -103,13 +107,12 @@ function optim.seboost_tao(opfunc, x, config, state)
 
 	local isMergeIter = false
   state.itr = state.itr + 1
-
+  
 	--node switch
   if (config.numNodes > 1 and state.itr % (config.nodeIters + 1) == 0) then
     --print ('In node switch '.. state.itr)
 		--a node has finished. Save its last x location
 		state.lastNodeXs[state.currNode] = x:clone()
-
 		--progress to next node
 		state.currNode = (state.currNode + 1)%config.numNodes
 
@@ -124,8 +127,9 @@ function optim.seboost_tao(opfunc, x, config, state)
   
 
   if (isMergeIter == false or config.numNodes == 1) then
-    config.optConfig[state.currNode] = config.optConfig[state.currNode] or copy2(config.initState)
-		x,fx = config.optMethod(opfunc, x, config.optConfig[state.currNode])
+    --config.optConfig[state.currNode] = config.optConfig[state.currNode] or copy2(config.initState)
+		--x,fx = config.optMethod(opfunc, x, config.optConfig[state.currNode])
+    x,fx = config.optMethod(opfunc, x, config.optConfig)
 		return x,fx
 	end
 
@@ -138,6 +142,11 @@ function optim.seboost_tao(opfunc, x, config, state)
   for i = 0, config.numNodes - 1 do   
     --[{ {}, i }] means: all of the first dim, slice in the second dim at i = get i col.
     state.dirs[{ {}, i + 1 }]:copy(state.lastNodeXs[i] - state.splitPoint) 
+    --Notmalization Tao Code
+    if isNormalize or state.dirs[{ {}, i + 1 }]:norm()<eps then
+      print('The normalize step is happen\n')
+      state.dirs[{ {}, i + 1 }] = state.dirs[{ {}, i + 1 }]/state.dirs[{ {}, i + 1 }]:norm()
+    end
   end
 
 --Tao Code
@@ -148,16 +157,17 @@ function optim.seboost_tao(opfunc, x, config, state)
      temp_dir = state.dirs
   end
 
-  state.aOpt = torch.ones(temp_dir:size(2))*(1/temp_dir:size(2)) --avrage
-  
-  if isCuda then
-    temp_dir = temp_dir:cuda()
-    state.aOpt = state.aOpt:cuda()
-  end
+  state.aOpt = torch.ones(temp_dir:size(2))*(1/temp_dir:size(2))
   
 
+  
   --now optimize!
-  local xInit = state.splitPoint
+  local xInit
+  if isAverage_Ini then
+    xInit = torch.mv(state.dirs,torch.ones(state.dirs:size(2))*(1/state.dirs:size(2)))+state.splitPoint
+  else
+    xInit = state.splitPoint;     
+  end
     -- create mini batch
   local subT = (state.sesopIteration) * sesopBatchSize + 1
   subT = subT % (sesopData:size(1) - sesopBatchSize) --Calculate the next batch index
@@ -165,8 +175,11 @@ function optim.seboost_tao(opfunc, x, config, state)
   local sesopTargets = sesopLabels:narrow(1, subT, sesopBatchSize)
 
   if isCuda then
-     sesopInputs = sesopInputs:cuda()
-     sesopTargets = sesopTargets:cuda()
+    xInit = xInit:cuda()
+    temp_dir = temp_dir:cuda()
+    state.aOpt = state.aOpt:cuda()
+    sesopInputs = sesopInputs:cuda()
+    sesopTargets = sesopTargets:cuda()
   end
 
   -- Create inner opfunc for finding a*
@@ -178,19 +191,21 @@ function optim.seboost_tao(opfunc, x, config, state)
     return afx, (dirMat:t()*adfdx)
   end
 
-  --x,f(x)
-  config.maxIter = config.numNodes
   local _, fHist = optim.cg(feval, state.aOpt, config, state) --Apply optimization using inner function
    
   --updating model weights!
   x:copy(xInit)
-  local sesopDir = state.dirs*state.aOpt 
+  local sesopDir = temp_dir*state.aOpt 
   x:add(sesopDir)
   
 
   --Tao code update the history direction here
   if state.histSize~=0 then
-    state.histspace = torch.cat(x - xInit,state.histspace:narrow(2,1,state.histSize-1),1)
+    local new_dir = x - xInit
+    if isNormalize or new_dir:nowm()<eps then
+      new_dir = new_dir/new_dir:norm()
+    end
+    state.histspace = torch.cat(new_dir,state.histspace:narrow(2,1,state.histSize-1),2)
   end
  
   --the new split point is 'x'.
