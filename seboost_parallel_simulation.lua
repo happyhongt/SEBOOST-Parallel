@@ -78,7 +78,7 @@ function optim.seboost_tao(opfunc, x, config, state)
   -- get/update state
   local config = config or {}
   local state = state or config
-  local isCuda = config.isCuda or false
+  local isCuda = config.isCuda or true
   local sesopData = config.sesopData
   local sesopLabels = config.sesopLabels
   local sesopBatchSize = config.sesopBatchSize or 100
@@ -100,6 +100,7 @@ function optim.seboost_tao(opfunc, x, config, state)
 	state.splitPoint = state.splitPoint or x:clone() --the first split point is the first point
   state.sesopIteration = state.sesopIteration or 0
   
+
 	local isMergeIter = false
   state.itr = state.itr + 1
 
@@ -107,8 +108,7 @@ function optim.seboost_tao(opfunc, x, config, state)
   if (config.numNodes > 1 and state.itr % (config.nodeIters + 1) == 0) then
     --print ('In node switch '.. state.itr)
 		--a node has finished. Save its last x location
-		state.lastNodeXs[state.currNode] = state.lastNodeXs[state.currNode] or x:clone()
-    state.lastNodeXs[state.currNode]:copy(x)
+		state.lastNodeXs[state.currNode] = x:clone()
 
 		--progress to next node
 		state.currNode = (state.currNode + 1)%config.numNodes
@@ -143,15 +143,14 @@ function optim.seboost_tao(opfunc, x, config, state)
 --Tao Code
   local temp_dir
   if state.histSize~=0 then
-     temp_dir = torch.zeros(x:size(1), config.numNodes+state.histSize);  
-     temp_dir = torch.cat(state.dirs,state.histspace,2);
+     temp_dir = torch.cat(state.dirs,state.histspace,2)
   else 
-     temp_dir = state.dirs:copy()
+     temp_dir = state.dirs
   end
 
   state.aOpt = torch.ones(temp_dir:size(2))*(1/temp_dir:size(2)) --avrage
   
-  if (isCuda) then
+  if isCuda then
     temp_dir = temp_dir:cuda()
     state.aOpt = state.aOpt:cuda()
   end
@@ -188,13 +187,10 @@ function optim.seboost_tao(opfunc, x, config, state)
   local sesopDir = state.dirs*state.aOpt 
   x:add(sesopDir)
   
-  local new_dir = torch.tensor(x:size(1))
-  new_dir:copy(x)
-  new_dir = new_dir - xInit
-  
+
   --Tao code update the history direction here
   if state.histSize~=0 then
-    state.histspace = torch.cat(new_dir,state.histspace:narrow(2,1,state.histSize-1),1)
+    state.histspace = torch.cat(x - xInit,state.histspace:narrow(2,1,state.histSize-1),1)
   end
  
   --the new split point is 'x'.
